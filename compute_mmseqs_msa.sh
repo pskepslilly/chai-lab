@@ -8,11 +8,6 @@ MMSEQS="mmseqs"
 
 SENSITIVITY=8
 
-MGNIFY="mgnify_gpu_db"
-UNIPROT="uniprot_gpu_db"
-UNIREF90="uniref90_gpu_db"
-PDB100="pdb100_230517"
-
 FILTER=1
 GPU=0
 
@@ -27,7 +22,7 @@ BASE=""
 QUERY=""
 THREADS=1
 UNIREF90="uniref90_gpu_db"
-PDB100="pdb100_230517"
+PDBDB="pdb100_230517"
 MGNIFY="mgnify_gpu_db"
 UNIPROT="uniprot_gpu_db"
 
@@ -46,7 +41,7 @@ while getopts "m:q:d:b:t:u:p:g:n:x:a:GD:Q:A:eTMf:h" opt; do
         b) BASE="$OPTARG" ;;
         t) THREADS="$OPTARG" ;;
         u) UNIREF90="$OPTARG" ;;
-        p) PDB100="$OPTARG" ;;
+        p) PDBDB="$OPTARG" ;;
         g) MGNIFY="$OPTARG" ;;
         n) UNIPROT="$OPTARG" ;;
         x) EXPAND_EVAL="$OPTARG" ;;
@@ -69,7 +64,7 @@ while getopts "m:q:d:b:t:u:p:g:n:x:a:GD:Q:A:eTMf:h" opt; do
             echo "  -m MMSEQS           MMseqs2 binary (default: mmseqs)"
             echo "  -t THREADS          Number of threads (default: 1)"
             echo "  -u UNIREF90         UniRef90 database (default: ${UNIREF90})"
-            echo "  -p PDB100           PDB100 database (default: ${PDB100})"
+            echo "  -p PDBDB           PDBDB database (default: ${PDBDB})"
             echo "  -g MGNIFY           MGnify database (default: ${MGNIFY})"
             echo "  -n UNIPROT          UniProt database (default: ${UNIPROT})"
             echo "  -x EXPAND_EVAL      Expand eval value (default: ${EXPAND_EVAL})"
@@ -99,6 +94,56 @@ if [ "${GPU}" = "0" ]; then
     echo "Currently only supports GPU acceleration"
     exit 1
 fi
+
+add_os_to_a3m() {
+    local raw_a3m=$1
+    local taxid_tsv=$2
+    local output_a3m=$3
+    
+    awk -v taxfile="${taxid_tsv}" '
+    BEGIN {
+        # Load OS mapping from file (theader column contains OS=...)
+        while ((getline line < taxfile) > 0) {
+            split(line, fields, "\t")
+            if (length(fields) >= 3) {
+                seqid = fields[1]
+                theader = fields[3]
+                # Extract OS=<species name> from theader
+                if (match(theader, /OS=([^ ]+ [^ ]+)/, os_match)) {
+                    os[seqid] = os_match[1]
+                }
+            }
+        }
+        close(taxfile)
+    }
+    /^>/ {
+        # Extract sequence ID (first word after >)
+        seqid = substr($1, 2)
+        
+        # Get OS, default to "" if not found
+        organism = (seqid in os) ? os[seqid] : ""
+        
+        # Print header with OS
+        if (organism != "") {
+            printf ">%s OS=%s", seqid, organism   
+        }
+        else {
+            printf ">%s", seqid
+        }
+        
+        # Add rest of original header if present
+        for (i = 2; i <= NF; i++) {
+            printf " %s", $i
+        }
+        printf "\n"
+        next
+    }
+    {
+        # Print sequence lines as-is
+        print
+    }
+    ' "${raw_a3m}" > "${output_a3m}"
+}
 
 add_taxid_to_a3m() {
     local raw_a3m=$1
@@ -172,8 +217,11 @@ if [ -z "$QUERY" ] || [ -z "$DBBASE" ] || [ -z "$BASE" ]; then
     exit 1
 fi
 
-extract_protein_sequences "${QUERY}" "${TMPDIR}/query_proteins.fasta"
-QUERY="${TMPDIR}/query_proteins.fasta"
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf -- "${TMP_DIR}"' EXIT
+
+extract_protein_sequences "${QUERY}" "${TMP_DIR}/query_proteins.fasta"
+QUERY="${TMP_DIR}/query_proteins.fasta"
 
 # Check if query file has any sequences
 if [ ! -s "${QUERY}" ]; then
@@ -218,8 +266,8 @@ if [ "${COMPUTE_MSA}" = "1" ]; then
     "${MMSEQS}" align "${BASE}/qdb" "${DBBASE}/${UNIPROT}" "${BASE}/res" "${BASE}/res_realign" --db-load-mode 2 --threads ${THREADS} -e ${ALIGN_EVAL} --max-accept ${MAX_ACCEPT} --alt-ali 10 -a
     "${MMSEQS}" filterresult "${BASE}/qdb" "${DBBASE}/${UNIPROT}" "${BASE}/res_realign" "${BASE}/res_realign_filter" --db-load-mode 2 --threads ${THREADS} --qid 0 --qsc $QSC --diff 0 --max-seq-id 1.0 --filter-min-enable 100
     "${MMSEQS}" result2msa "${BASE}/qdb" "${DBBASE}/${UNIPROT}" "${BASE}/res_realign_filter" "${BASE}/raw_hits_uniprot.a3m" --msa-format-mode 6 --db-load-mode 2 --threads ${THREADS} ${FILTER_PARAM}
-    "${MMSEQS}" convertalis "${BASE}/qdb" "${DBBASE}/${UNIPROT}" "${BASE}/res_realign_filter" "${BASE}/uniprot_taxid_mapping.tsv" --format-output "target,taxid" --threads ${THREADS} --db-load-mode 2 --db-output 0
-    add_taxid_to_a3m "${BASE}/raw_hits_uniprot.a3m" "${BASE}/uniprot_taxid_mapping.tsv" "${BASE}/hits_uniprot.a3m"
+    "${MMSEQS}" convertalis "${BASE}/qdb" "${DBBASE}/${UNIPROT}" "${BASE}/res_realign_filter" "${BASE}/uniprot_taxid_mapping.tsv" --format-output "target,taxid,theader" --threads ${THREADS} --db-load-mode 2 --db-output 0
+    add_os_to_a3m "${BASE}/raw_hits_uniprot.a3m" "${BASE}/uniprot_taxid_mapping.tsv" "${BASE}/hits_uniprot.a3m"
     "${MMSEQS}" rmdb "${BASE}/res_realign"
     # "${MMSEQS}" rmdb "${BASE}/res_exp"
     "${MMSEQS}" rmdb "${BASE}/res"
@@ -231,8 +279,8 @@ if [ "${COMPUTE_TEMPLATE}" = "1" ]; then
     if [[ -f "${BASE}/prof_res" ]]; then
         query="${BASE}/prof_res"
     fi
-  "${MMSEQS}" search "${query}" "${DBBASE}/${PDB100}" "${BASE}/res_pdb" "${BASE}/tmp" $TEMPLATE_SEARCH_PARAM
-  "${MMSEQS}" convertalis "${query}" "${DBBASE}/${PDB100}" "${BASE}/res_pdb" "${BASE}/all_chain_templates.m8" --threads ${THREADS} --format-output query,target,fident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits,cigar --db-load-mode 2 --db-output 1
+  "${MMSEQS}" search "${query}" "${DBBASE}/${PDBDB}" "${BASE}/res_pdb" "${BASE}/tmp" $TEMPLATE_SEARCH_PARAM
+  "${MMSEQS}" convertalis "${query}" "${DBBASE}/${PDBDB}" "${BASE}/res_pdb" "${BASE}/all_chain_templates.m8" --threads ${THREADS} --format-output query,target,fident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits,cigar --db-load-mode 2 --db-output 1
   "${MMSEQS}" rmdb "${BASE}/res_pdb"
 fi
 

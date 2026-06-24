@@ -8,7 +8,7 @@ module load MMseqs2
 source ${PROF}
 conda activate ${VENV}
 
-MSA_SCRIPT="/trainfs/data/comp_bio/apps/chai-lab-0.6.1/compute_msa.sh"
+MSA_SCRIPT="/trainfs/data/comp_bio/apps/chai-lab-0.6.1/compute_mmseqs_msa.sh"
 BASE_DB="/trainfs/data/comp_bio/data/CHAIDB/"
 
 help() {
@@ -24,6 +24,8 @@ echo "Options:"
 echo "  --use-esm-embeddings / --no-use-esm-embeddings"
 echo "                                  [default: use-esm-embeddings]"
 echo "  --use-msa"
+echo "                                  [default: False]"
+echo "  --jackhmmer                     Use slower but potentially more accurate jackhmmer for MSA generation NOTE :: this requires the env variable JACKHMMER_CORES to be set"
 echo "                                  [default: False]"
 echo "  --msa-output-directory PATH"
 echo "  --constraint-path PATH"
@@ -54,7 +56,7 @@ while [[ $# -gt 0 ]]; do
             # Handle boolean flags
             shift
             ;;
-        --use-templates|--use-msa)
+        --use-templates|--use-msa|--jackhmmer)
             shift
             ;;
         --low-memory|--no-low-memory)
@@ -162,10 +164,20 @@ if [ "$1" = "fold" ]; then
     fi
 
     if [ "$MSA_ARGS" != "" ]; then
-        echo "EXECUTING :: ${MSA_SCRIPT}" -q "${FASTA_FILE}" -d "${BASE_DB}" -b "${MSA_OUTPUT_DIRECTORY}" -G ${MSA_ARGS}
-        "${MSA_SCRIPT}" -q "${FASTA_FILE}" -d "${BASE_DB}" -b "${MSA_OUTPUT_DIRECTORY}" -G ${MSA_ARGS}
+        REQUIRED_MSA_ARGS="-G"
+        if check_arg_exists "--jackhmmer" "$@"; then
+            echo "using JACKHMMER"
+            MSA_SCRIPT="/trainfs/data/comp_bio/apps/chai-lab-0.6.1/compute_jackhmmer_msa.sh"
+            if [ -z "${JACKHMMER_CORES}" ]; then
+                echo "Error: JACKHMMER_CORES environment variable is not set. Please set it to the number of cores to use for jackhmmer using 'export JACKHMMER_CORES=<num cores>'."
+                exit 1
+            fi
+            REQUIRED_MSA_ARGS="-c ${JACKHMMER_CORES}"
+        fi
+        echo "EXECUTING :: ${MSA_SCRIPT}" -q "${FASTA_FILE}" -d "${BASE_DB}" -b "${MSA_OUTPUT_DIRECTORY}" ${REQUIRED_MSA_ARGS} ${MSA_ARGS}
+        "${MSA_SCRIPT}" -q "${FASTA_FILE}" -d "${BASE_DB}" -b "${MSA_OUTPUT_DIRECTORY}" ${REQUIRED_MSA_ARGS} ${MSA_ARGS}
         for file in "${MSA_OUTPUT_DIRECTORY}"/*; do
-            if [[ -d "${file}" ]]; then
+            if [[ -d "${file}" ]] && [[ "${file}" != "${MSA_OUTPUT_DIRECTORY}/tmp" ]]; then
                 chai-lab a3m-to-pqt "${file}" --output-directory "${MSA_OUTPUT_DIRECTORY}"
             fi
         done
@@ -178,6 +190,7 @@ if [ "$1" = "fold" ]; then
     ARGS=($(remove_arg_from_params "--msa-output-directory" "1" "$@"))
     ARGS=($(remove_arg_from_params "--use-msa" "0" "${ARGS[@]}"))
     ARGS=($(remove_arg_from_params "--use-templates" "0" "${ARGS[@]}"))
+    ARGS=($(remove_arg_from_params "--jackhmmer" "0" "${ARGS[@]}"))
 
     echo "chai-lab ${ARGS[@]}" $ADDITIONAL_ARGS
 fi
